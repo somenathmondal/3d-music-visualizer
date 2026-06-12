@@ -203,18 +203,18 @@ function initThree() {
 }
 
 function buildPianoKeyboard() {
-  const whiteKeyWidth = 0.28;
+  const whiteKeyWidth = 0.38; // Slightly wider keys for better 3D visibility
   const whiteKeyHeight = 0.16;
   const whiteKeyDepth = 2.2;
-  const blackKeyWidth = 0.16;
+  const blackKeyWidth = 0.20; // Chunkier black keys
   const blackKeyHeight = 0.26;
   const blackKeyDepth = 1.35;
-  const startX = - (52 * whiteKeyWidth) / 2;
+  const startX = - (36 * whiteKeyWidth) / 2; // 36 white keys in a 61-key range
 
   // Determine white key indices
   let whiteKeyCount = 0;
   const pitchInfo = {};
-  for (let m = 21; m <= 108; m++) {
+  for (let m = 36; m <= 96; m++) {
     const noteInOctave = m % 12;
     const isBlack = [1, 3, 6, 8, 10].includes(noteInOctave);
     pitchInfo[m] = { isBlack };
@@ -225,7 +225,7 @@ function buildPianoKeyboard() {
   }
 
   // Generate Key meshes
-  for (let m = 21; m <= 108; m++) {
+  for (let m = 36; m <= 96; m++) {
     const info = pitchInfo[m];
     let mesh, defaultColor;
 
@@ -235,7 +235,6 @@ function buildPianoKeyboard() {
       midiToX.set(m, x);
 
       const whiteKeyGeo = new THREE.BoxGeometry(whiteKeyWidth - 0.02, whiteKeyHeight, whiteKeyDepth);
-      // Offset geometry origin to the back edge for realistic pivoting
       whiteKeyGeo.translate(0, 0, -whiteKeyDepth / 2);
       
       const whiteKeyMat = new THREE.MeshStandardMaterial({
@@ -263,7 +262,6 @@ function buildPianoKeyboard() {
       });
 
       mesh = new THREE.Mesh(blackKeyGeo, blackKeyMat);
-      // Place black keys raised slightly, shifted back on Z
       mesh.position.set(x, whiteKeyHeight + blackKeyHeight / 2 - 0.04, blackKeyDepth / 2 - 0.25);
       pianoGroup.add(mesh);
       defaultColor = new THREE.Color(0x1c1c1c);
@@ -622,8 +620,9 @@ function loadSongTimeline(song) {
         }, time);
       }, note.time);
 
-      // Create visual falling notes for the piano roll
-      const midi = noteToMidi(note.note);
+      // Create visual falling notes for the piano roll (clamped to 61 keys)
+      const rawMidi = noteToMidi(note.note);
+      const midi = Math.max(36, Math.min(96, rawMidi));
       if (midiToX.has(midi)) {
         const x = midiToX.get(midi);
         const isBlack = pianoKeysMap.get(midi)?.isBlack || false;
@@ -673,7 +672,8 @@ function triggerPadFlash(phraseId, noteIndex) {
   const phrase = activeSongPhrases.find(p => p.phraseId === phraseId);
   if (!phrase) return;
   const noteObj = phrase.notes[noteIndex];
-  const midi = noteToMidi(noteObj.note);
+  const rawMidi = noteToMidi(noteObj.note);
+  const midi = Math.max(36, Math.min(96, rawMidi));
 
   // 1. Flash Piano Key
   const pianoKey = pianoKeysMap.get(midi);
@@ -709,10 +709,11 @@ function triggerPadFlash(phraseId, noteIndex) {
 }
 
 function spawnPianoSparks(midi, colorHex) {
-  const x = midiToX.get(midi);
+  const clampedMidi = Math.max(36, Math.min(96, midi));
+  const x = midiToX.get(clampedMidi);
   if (x === undefined) return;
 
-  const isBlack = pianoKeysMap.get(midi)?.isBlack || false;
+  const isBlack = pianoKeysMap.get(clampedMidi)?.isBlack || false;
   const spawnY = isBlack ? 0.35 : 0.20;
   const spawnZ = isBlack ? 0.35 : 1.1;
 
