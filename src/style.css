@@ -442,6 +442,8 @@ body {
 /* --- MOBILE RESPONSIVENESS --- */
 @media (max-width: 768px) {
   .overlay-card {
+    width: 80%;
+    max-width: 320px;
     padding: 24px;
     gap: 16px;
     max-height: 90vh;
