@@ -27,7 +27,7 @@ const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera
 // Dynamic Settings (controlled via UI)
 let gravityVal = 12.0;            // Gravity acceleration (units/s^2)
 let activeFilter = 'all';
-let bloomEnabled = !isMobileDevice; // Disable bloom on mobile by default to prevent black screen WebGL2 failures
+let bloomEnabled = true;          // Enabled on all devices (including mobile)
 let trailsEnabled = true;
 let railsVisible = true;
 let ballSizeMultiplier = 1.0;
