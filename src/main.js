@@ -34,6 +34,16 @@ let ballSizeMultiplier = 1.0;
 let cameraMode = 'auto';         // 'auto' = free orbit + autoRotate, 'orbit' = manual only, 'follow' = ball track
 let cameraAngle = 0;             // used for auto-orbiting
 
+// Piano Visualizer State
+let activeTab = 'kinematic'; // 'kinematic' or 'piano'
+let pianoGroup;
+let pianoNoteRunwayGroup;
+const pianoKeysMap = new Map(); // Key: midiNumber, Value: { mesh, isBlack, defaultColor, pressProgress }
+const midiToX = new Map(); // Key: midiNumber, Value: X coordinate
+const pianoNotesList = []; // List of note block objects in the runway
+const pianoSparks = []; // Dynamic particle array for key hits
+const scrollSpeed = 5.0; // Units per second falling rate
+
 // Registry and Pools
 const padRegistry = new Map();   // Key: "phraseId_noteIndex", Value: { mesh, outerMesh, position, flashProgress, innerMaterial, outerMaterial, noteName }
 let activeBalls = [];            // Array of active ball objects
@@ -179,6 +189,93 @@ function initThree() {
   composer.addPass(bloomPass);
 
   window.addEventListener('resize', onWindowResize);
+
+  // --- PIANO KEYBOARD BUILD ---
+  pianoGroup = new THREE.Group();
+  scene.add(pianoGroup);
+  
+  pianoNoteRunwayGroup = new THREE.Group();
+  pianoNoteRunwayGroup.position.set(0, 0, 0);
+  pianoGroup.add(pianoNoteRunwayGroup);
+  
+  buildPianoKeyboard();
+  pianoGroup.visible = false; // Hidden by default
+}
+
+function buildPianoKeyboard() {
+  const whiteKeyWidth = 0.28;
+  const whiteKeyHeight = 0.16;
+  const whiteKeyDepth = 2.2;
+  const blackKeyWidth = 0.16;
+  const blackKeyHeight = 0.26;
+  const blackKeyDepth = 1.35;
+  const startX = - (52 * whiteKeyWidth) / 2;
+
+  // Determine white key indices
+  let whiteKeyCount = 0;
+  const pitchInfo = {};
+  for (let m = 21; m <= 108; m++) {
+    const noteInOctave = m % 12;
+    const isBlack = [1, 3, 6, 8, 10].includes(noteInOctave);
+    pitchInfo[m] = { isBlack };
+    if (!isBlack) {
+      pitchInfo[m].whiteIndex = whiteKeyCount;
+      whiteKeyCount++;
+    }
+  }
+
+  // Generate Key meshes
+  for (let m = 21; m <= 108; m++) {
+    const info = pitchInfo[m];
+    let mesh, defaultColor;
+
+    if (!info.isBlack) {
+      // White Key
+      const x = startX + info.whiteIndex * whiteKeyWidth + whiteKeyWidth / 2;
+      midiToX.set(m, x);
+
+      const whiteKeyGeo = new THREE.BoxGeometry(whiteKeyWidth - 0.02, whiteKeyHeight, whiteKeyDepth);
+      // Offset geometry origin to the back edge for realistic pivoting
+      whiteKeyGeo.translate(0, 0, -whiteKeyDepth / 2);
+      
+      const whiteKeyMat = new THREE.MeshStandardMaterial({
+        color: 0xdddddd,
+        metalness: 0.15,
+        roughness: 0.45
+      });
+      
+      mesh = new THREE.Mesh(whiteKeyGeo, whiteKeyMat);
+      mesh.position.set(x, whiteKeyHeight / 2, whiteKeyDepth / 2);
+      pianoGroup.add(mesh);
+      defaultColor = new THREE.Color(0xdddddd);
+    } else {
+      // Black Key (dependent on neighbor white keys)
+      const x = (midiToX.get(m - 1) + midiToX.get(m + 1)) / 2;
+      midiToX.set(m, x);
+
+      const blackKeyGeo = new THREE.BoxGeometry(blackKeyWidth, blackKeyHeight, blackKeyDepth);
+      blackKeyGeo.translate(0, 0, -blackKeyDepth / 2);
+
+      const blackKeyMat = new THREE.MeshStandardMaterial({
+        color: 0x1c1c1c,
+        metalness: 0.3,
+        roughness: 0.35
+      });
+
+      mesh = new THREE.Mesh(blackKeyGeo, blackKeyMat);
+      // Place black keys raised slightly, shifted back on Z
+      mesh.position.set(x, whiteKeyHeight + blackKeyHeight / 2 - 0.04, blackKeyDepth / 2 - 0.25);
+      pianoGroup.add(mesh);
+      defaultColor = new THREE.Color(0x1c1c1c);
+    }
+
+    pianoKeysMap.set(m, {
+      mesh: mesh,
+      isBlack: info.isBlack,
+      defaultColor: defaultColor,
+      pressProgress: 0.0
+    });
+  }
 }
 
 function onWindowResize() {
@@ -471,6 +568,22 @@ function buildVisualLayout(song) {
   assignRadialSpokes(leadPhrases, 0.05, (2 * Math.PI) / 3 - 0.05, 'lead');
   assignRadialSpokes(altoPhrases, (2 * Math.PI) / 3 + 0.05, (4 * Math.PI) / 3 - 0.05, 'alto');
   assignRadialSpokes(bassPhrases, (4 * Math.PI) / 3 + 0.05, 2 * Math.PI - 0.05, 'bass');
+
+  // Enforce visibility based on activeTab
+  const isKinematic = (activeTab === 'kinematic');
+  scene.traverse(child => {
+    if (child.name && (
+      child.name.startsWith('launcher-') || 
+      child.name.startsWith('rail-') || 
+      child.name.startsWith('hub-')
+    )) {
+      child.visible = isKinematic && (child.name.startsWith('rail-') ? railsVisible : true);
+    }
+  });
+  padRegistry.forEach(pad => {
+    pad.mesh.visible = isKinematic;
+    pad.outerMesh.visible = isKinematic;
+  });
 }
 
 // --- AUDIO TIMELINE SYNCHRONIZATION ---
@@ -483,12 +596,21 @@ function loadSongTimeline(song) {
   // Set BPM
   Tone.Transport.bpm.value = song.bpm;
 
+  // Clear old runway notes
+  pianoNotesList.forEach(n => {
+    pianoNoteRunwayGroup.remove(n.mesh);
+    n.mesh.geometry.dispose();
+    n.mesh.material.dispose();
+  });
+  pianoNotesList.length = 0;
+
   // Schedule notes by phrase blocks
   let maxTime = 0;
 
   activeSongPhrases.forEach(phraseObj => {
     const phraseId = phraseObj.phraseId;
     const track = phraseObj.track;
+    const trackColorHex = song.tracks[track].color;
 
     phraseObj.notes.forEach((note, noteIdx) => {
       if (note.time > maxTime) maxTime = note.time;
@@ -499,6 +621,45 @@ function loadSongTimeline(song) {
           triggerPadFlash(phraseId, noteIdx);
         }, time);
       }, note.time);
+
+      // Create visual falling notes for the piano roll
+      const midi = noteToMidi(note.note);
+      if (midiToX.has(midi)) {
+        const x = midiToX.get(midi);
+        const isBlack = pianoKeysMap.get(midi)?.isBlack || false;
+
+        const noteWidth = isBlack ? 0.12 : 0.20;
+        const noteDepth = 0.15;
+        const noteHeight = note.duration * scrollSpeed;
+
+        const noteGeo = new THREE.BoxGeometry(noteWidth, noteHeight, noteDepth);
+        const noteMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(trackColorHex),
+          emissive: new THREE.Color(trackColorHex),
+          emissiveIntensity: 0.8,
+          roughness: 0.3,
+          metalness: 0.2
+        });
+
+        const noteMesh = new THREE.Mesh(noteGeo, noteMat);
+        
+        // Position on Y based on hit time * scrollSpeed
+        const yOffset = note.time * scrollSpeed + noteHeight / 2;
+        const zOffset = isBlack ? 0.3 : 1.0;
+
+        noteMesh.position.set(x, yOffset, zOffset);
+        pianoNoteRunwayGroup.add(noteMesh);
+
+        pianoNotesList.push({
+          midiNumber: midi,
+          track: track,
+          mesh: noteMesh,
+          time: note.time,
+          duration: note.duration,
+          height: noteHeight,
+          hasHit: false
+        });
+      }
     });
   });
 
@@ -509,6 +670,27 @@ function loadSongTimeline(song) {
 
 // --- VISUAL EFFECT: FLASHER AND RIPPLES ---
 function triggerPadFlash(phraseId, noteIndex) {
+  const phrase = activeSongPhrases.find(p => p.phraseId === phraseId);
+  if (!phrase) return;
+  const noteObj = phrase.notes[noteIndex];
+  const midi = noteToMidi(noteObj.note);
+
+  // 1. Flash Piano Key
+  const pianoKey = pianoKeysMap.get(midi);
+  if (pianoKey) {
+    if (activeFilter === 'all' || phrase.track === activeFilter) {
+      pianoKey.pressProgress = 1.0;
+      const trackColorHex = activeSong.tracks[phrase.track].color;
+      pianoKey.mesh.material.color.set(trackColorHex);
+      if (pianoKey.mesh.material.emissive) {
+        pianoKey.mesh.material.emissive.set(trackColorHex);
+        pianoKey.mesh.material.emissiveIntensity = 1.5;
+      }
+      spawnPianoSparks(midi, trackColorHex);
+    }
+  }
+
+  // 2. Flash Kinematic Pad
   const padKey = `${phraseId}_${noteIndex}`;
   const pad = padRegistry.get(padKey);
   if (pad) {
@@ -523,6 +705,47 @@ function triggerPadFlash(phraseId, noteIndex) {
     diagNote.style.color = '#' + pad.innerMaterial.color.getHexString();
 
     createRipple(pad.position, pad.innerMaterial.color);
+  }
+}
+
+function spawnPianoSparks(midi, colorHex) {
+  const x = midiToX.get(midi);
+  if (x === undefined) return;
+
+  const isBlack = pianoKeysMap.get(midi)?.isBlack || false;
+  const spawnY = isBlack ? 0.35 : 0.20;
+  const spawnZ = isBlack ? 0.35 : 1.1;
+
+  const count = isMobileDevice ? 8 : 18;
+  const color = new THREE.Color(colorHex);
+
+  for (let i = 0; i < count; i++) {
+    const size = 0.04 + Math.random() * 0.04;
+    const sparkGeo = new THREE.BoxGeometry(size, size, size);
+    const sparkMat = new THREE.MeshBasicMaterial({
+      color: color,
+      transparent: true,
+      opacity: 1.0
+    });
+
+    const sparkMesh = new THREE.Mesh(sparkGeo, sparkMat);
+    sparkMesh.position.set(x, spawnY, spawnZ);
+    pianoGroup.add(sparkMesh);
+
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1.5 + Math.random() * 3.0;
+    const vx = Math.cos(angle) * speed * 0.4;
+    const vy = 2.5 + Math.random() * 4.0;
+    const vz = Math.sin(angle) * speed * 0.4;
+
+    pianoSparks.push({
+      mesh: sparkMesh,
+      vx: vx,
+      vy: vy,
+      vz: vz,
+      life: 1.0,
+      decay: 1.0 / (0.4 + Math.random() * 0.5)
+    });
   }
 }
 
@@ -888,12 +1111,82 @@ function animate() {
   updateRipples(dt);
   updatePadsDecay();
 
+  // --- PIANO ANIMATIONS UPDATE ---
+  if (activeTab === 'piano') {
+    // 1. Scroll Runway notes
+    pianoNoteRunwayGroup.position.y = -Tone.Transport.seconds * scrollSpeed;
+
+    // 2. Animate keyboard keys
+    const whiteKeyHeight = 0.16;
+    const blackKeyHeight = 0.26;
+    pianoKeysMap.forEach((keyVal, midi) => {
+      if (keyVal.pressProgress > 0) {
+        keyVal.pressProgress = Math.max(0, keyVal.pressProgress - dt * 4.0);
+      }
+      
+      const p = keyVal.pressProgress;
+      if (keyVal.isBlack) {
+        // Move black keys downwards
+        keyVal.mesh.position.y = (whiteKeyHeight + blackKeyHeight / 2 - 0.04) - 0.08 * p;
+      } else {
+        // Rotate white keys around back edge pivot
+        keyVal.mesh.rotation.x = -0.06 * p;
+      }
+
+      // Restore key colors gradually
+      keyVal.mesh.material.color.lerp(keyVal.defaultColor, dt * 5.0);
+      if (keyVal.mesh.material.emissive) {
+        keyVal.mesh.material.emissiveIntensity = 1.5 * p;
+        if (p === 0) {
+          keyVal.mesh.material.emissive.set(0x000000);
+        }
+      }
+    });
+
+    // 3. Update Sparks Particles
+    for (let i = pianoSparks.length - 1; i >= 0; i--) {
+      const s = pianoSparks[i];
+      s.life -= dt * s.decay;
+      if (s.life <= 0) {
+        pianoGroup.remove(s.mesh);
+        s.mesh.geometry.dispose();
+        s.mesh.material.dispose();
+        pianoSparks.splice(i, 1);
+      } else {
+        s.vy -= 12.0 * dt; // gravity
+        s.mesh.position.x += s.vx * dt;
+        s.mesh.position.y += s.vy * dt;
+        s.mesh.position.z += s.vz * dt;
+        s.mesh.material.opacity = s.life;
+        s.mesh.rotation.x += 2.0 * dt;
+        s.mesh.rotation.y += 2.0 * dt;
+      }
+    }
+  }
+
   // Camera views
-  if (cameraMode === 'follow' && activeBalls.length > 0) {
-    const targetBall = activeBalls[activeBalls.length - 1];
-    const targetPos = new THREE.Vector3();
-    targetBall.mesh.getWorldPosition(targetPos);
-    controls.target.lerp(targetPos, 0.06);
+  if (cameraMode === 'follow') {
+    if (activeTab === 'kinematic' && activeBalls.length > 0) {
+      const targetBall = activeBalls[activeBalls.length - 1];
+      const targetPos = new THREE.Vector3();
+      targetBall.mesh.getWorldPosition(targetPos);
+      controls.target.lerp(targetPos, 0.06);
+    } else if (activeTab === 'piano') {
+      // Look at average active key press X position for cinematic melody focus
+      let avgX = 0, activeCount = 0;
+      pianoKeysMap.forEach((keyVal, midi) => {
+        if (keyVal.pressProgress > 0.1) {
+          avgX += midiToX.get(midi);
+          activeCount++;
+        }
+      });
+      if (activeCount > 0) {
+        avgX /= activeCount;
+        controls.target.lerp(new THREE.Vector3(avgX, 0.5, 0.8), 0.06);
+      } else {
+        controls.target.lerp(new THREE.Vector3(0, 0.5, 0.8), 0.03);
+      }
+    }
   }
   // autoRotate is handled natively by controls.update() below
 
@@ -963,6 +1256,27 @@ function resetVisualizer() {
   document.getElementById('diag-time').innerText = "t=0.0";
   document.getElementById('diag-note').innerText = "--";
 
+  // Reset piano visualizer states
+  if (pianoNoteRunwayGroup) {
+    pianoNoteRunwayGroup.position.set(0, 0, 0);
+  }
+  pianoSparks.forEach(s => {
+    pianoGroup.remove(s.mesh);
+    s.mesh.geometry.dispose();
+    s.mesh.material.dispose();
+  });
+  pianoSparks.length = 0;
+
+  pianoKeysMap.forEach(keyVal => {
+    keyVal.pressProgress = 0.0;
+    keyVal.mesh.material.color.copy(keyVal.defaultColor);
+    if (keyVal.mesh.material.emissive) {
+      keyVal.mesh.material.emissive.set(0x000000);
+      keyVal.mesh.material.emissiveIntensity = 0;
+    }
+    keyVal.mesh.rotation.set(0, 0, 0);
+  });
+
   if (isEnginePlaying) {
     Tone.Transport.start();
   }
@@ -972,6 +1286,54 @@ function resetVisualizer() {
 function setupUIListeners() {
   // Sync bloom checkbox state
   document.getElementById('toggle-bloom').checked = bloomEnabled;
+
+  // Tabs (Kinematic vs Piano Keyboard view)
+  const tabKinematic = document.getElementById('tab-kinematic');
+  const tabPiano = document.getElementById('tab-piano');
+
+  const setTabMode = (tabName) => {
+    activeTab = tabName;
+    const isKinematic = (activeTab === 'kinematic');
+
+    // Toggle Tab button styles
+    tabKinematic.classList.toggle('active', isKinematic);
+    tabPiano.classList.toggle('active', !isKinematic);
+
+    // Hide/show Kinematic items
+    scene.traverse(child => {
+      if (child.name && (
+        child.name.startsWith('launcher-') || 
+        child.name.startsWith('rail-') || 
+        child.name.startsWith('hub-')
+      )) {
+        child.visible = isKinematic && (child.name.startsWith('rail-') ? railsVisible : true);
+      }
+    });
+
+    padRegistry.forEach(pad => {
+      pad.mesh.visible = isKinematic;
+      pad.outerMesh.visible = isKinematic;
+    });
+
+    // Hide/show Piano items
+    if (pianoGroup) {
+      pianoGroup.visible = !isKinematic;
+    }
+
+    // Camera positioning reset based on mode
+    if (isKinematic) {
+      controls.target.set(0, 3, 0);
+      camera.position.set(0, 11, 20);
+      controls.maxPolarAngle = Math.PI / 2 - 0.05;
+    } else {
+      controls.target.set(0, 0.5, 0.8);
+      camera.position.set(0, 6.5, 6.5);
+      controls.maxPolarAngle = Math.PI / 2 + 0.15;
+    }
+  };
+
+  tabKinematic.addEventListener('click', () => setTabMode('kinematic'));
+  tabPiano.addEventListener('click', () => setTabMode('piano'));
 
   // Start overlay click
   const startBtn = document.getElementById('start-btn');

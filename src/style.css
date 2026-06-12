@@ -305,6 +305,48 @@ body {
   text-shadow: 0 0 8px var(--accent-coral-glow);
 }
 
+/* Top Center Tab Selector */
+.hud-tabs {
+  position: absolute;
+  top: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: 30px;
+  padding: 4px;
+  box-shadow: var(--glass-shadow);
+  z-index: 15;
+}
+
+.btn-tab {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  padding: 8px 20px;
+  border-radius: 24px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.19, 1, 0.22, 1);
+  font-family: 'Space Mono', monospace;
+  text-transform: uppercase;
+}
+
+.btn-tab:hover {
+  color: var(--text-primary);
+}
+
+.btn-tab.active {
+  background: var(--accent-coral);
+  color: var(--text-primary);
+  box-shadow: 0 4px 12px var(--accent-coral-glow);
+}
+
 /* Bottom Right Controls Overlay */
 .hud-controls-right {
   position: absolute;
@@ -518,12 +560,28 @@ body {
   }
 
   #settings-panel {
-    top: 65px;
+    top: 110px;
     right: 20px;
     width: calc(100% - 40px);
-    max-height: calc(100vh - 110px);
+    max-height: calc(100vh - 150px);
     overflow-y: auto;
     padding: 16px;
     gap: 16px;
+  }
+
+  .hud-tabs {
+    top: 55px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 80%;
+    max-width: 320px;
+  }
+
+  .btn-tab {
+    flex: 1;
+    padding: 6px 10px;
+    font-size: 9px;
+    letter-spacing: 0.5px;
+    text-align: center;
   }
 }
