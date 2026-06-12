@@ -512,6 +512,9 @@ function triggerPadFlash(phraseId, noteIndex) {
   const padKey = `${phraseId}_${noteIndex}`;
   const pad = padRegistry.get(padKey);
   if (pad) {
+    // If track is filtered out, do not flash or create ripples
+    if (activeFilter !== 'all' && pad.track !== activeFilter) return;
+
     pad.flashProgress = 1.0;
     
     // Update diagnostic playing note
