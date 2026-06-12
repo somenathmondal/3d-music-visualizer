@@ -1142,39 +1142,46 @@ function setupUIListeners() {
   // Custom MIDI Upload
   const setupMidiLoader = (fileInputId) => {
     const fileInput = document.getElementById(fileInputId);
-    fileInput.addEventListener('change', (e) => {
-      const file = e.target.files[0];
-      if (file) handleMidiFile(file);
-    });
+    if (fileInput) {
+      fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) handleMidiFile(file);
+      });
+    }
   };
 
   setupMidiLoader('midi-file-input');
   setupMidiLoader('midi-file-input-hud');
 
-  document.getElementById('midi-select-btn').addEventListener('click', () => {
-    document.getElementById('midi-file-input').click();
-  });
+  const midiSelectBtn = document.getElementById('midi-select-btn');
+  if (midiSelectBtn) {
+    midiSelectBtn.addEventListener('click', () => {
+      const midiFileInput = document.getElementById('midi-file-input');
+      if (midiFileInput) midiFileInput.click();
+    });
+  }
 
   // Drag & drop
   const dropZone = document.querySelector('.midi-upload-box');
-  
-  dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    dropZone.classList.add('drag-over');
-  });
+  if (dropZone) {
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('drag-over');
+    });
 
-  dropZone.addEventListener('dragleave', () => {
-    dropZone.classList.remove('drag-over');
-  });
+    dropZone.addEventListener('dragleave', () => {
+      dropZone.classList.remove('drag-over');
+    });
 
-  dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('drag-over');
-    const file = e.dataTransfer.files[0];
-    if (file && (file.name.endsWith('.mid') || file.name.endsWith('.midi'))) {
-      handleMidiFile(file);
-    }
-  });
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      if (file && (file.name.endsWith('.mid') || file.name.endsWith('.midi'))) {
+        handleMidiFile(file);
+      }
+    });
+  }
 }
 
 // --- MIDI PARSING AND SONG INGESTION ---
