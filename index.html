@@ -90,8 +90,8 @@
           <div class="sidebar-section">
             <h4>Camera View</h4>
             <select id="camera-select" class="hud-select">
-              <option value="auto">Auto Orbiting</option>
-              <option value="orbit">Free Orbit Controls</option>
+              <option value="auto" selected>Auto-Rotate + Free Orbit</option>
+              <option value="orbit">Manual Orbit Only</option>
               <option value="follow">Follow Ball Focus</option>
             </select>
           </div>
@@ -103,6 +103,18 @@
                 <span>Bloom Glow Effect</span>
                 <input type="checkbox" id="toggle-bloom" checked />
               </label>
+              <div class="setting-slider-item" id="bloom-controls">
+                <span>Bloom Strength</span>
+                <input type="range" id="slider-bloom-strength" min="0.0" max="4.0" step="0.1" value="0.7" />
+              </div>
+              <div class="setting-slider-item">
+                <span>Bloom Radius</span>
+                <input type="range" id="slider-bloom-radius" min="0.0" max="1.0" step="0.05" value="0.45" />
+              </div>
+              <div class="setting-slider-item">
+                <span>Bloom Threshold</span>
+                <input type="range" id="slider-bloom-threshold" min="0.0" max="1.0" step="0.05" value="0.15" />
+              </div>
               <label class="setting-item">
                 <span>Show Physical Rails</span>
                 <input type="checkbox" id="toggle-rails-vis" checked />
@@ -118,6 +130,28 @@
               <div class="setting-slider-item">
                 <span>Gravity Strength</span>
                 <input type="range" id="slider-gravity" min="5.0" max="25.0" step="0.5" value="12.0" />
+              </div>
+            </div>
+          </div>
+
+          <div class="sidebar-section">
+            <h4>Lighting</h4>
+            <div class="settings-list">
+              <div class="setting-slider-item">
+                <span>Ambient</span>
+                <input type="range" id="slider-light-ambient" min="0.0" max="3.0" step="0.05" value="1.2" />
+              </div>
+              <div class="setting-slider-item">
+                <span>Center Point</span>
+                <input type="range" id="slider-light-center" min="0.0" max="8.0" step="0.1" value="3.0" />
+              </div>
+              <div class="setting-slider-item">
+                <span>Key Directional</span>
+                <input type="range" id="slider-light-dir" min="0.0" max="4.0" step="0.1" value="1.2" />
+              </div>
+              <div class="setting-slider-item">
+                <span>Fill / Rim</span>
+                <input type="range" id="slider-light-fill" min="0.0" max="3.0" step="0.1" value="1.0" />
               </div>
             </div>
           </div>

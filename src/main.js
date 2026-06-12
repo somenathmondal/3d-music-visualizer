@@ -9,16 +9,17 @@ import { Midi } from '@tonejs/midi';
 import { demoSong, shapeOfYouSong, hedwigSong, initAudio, playSynthNote, setTrackMute } from './audio.js';
 
 // --- ENGINE STATE ---
-let scene, camera, renderer, composer, controls;
-let activeSong = demoSong;
+let scene, camera, renderer, composer, controls, bloomPass;
+let lightAmbient, lightHemi, lightCenter, lightFill, lightDir, lightRim;
+let activeSong = hedwigSong;
 let isEnginePlaying = false;
 let audioInitialized = false;
 
 // Physics and Timeline Settings
 const SLIDE_DURATION = 1.0;      // Time spent sliding down the rail (seconds)
-const FLIGHT_DURATION = 1.2;     // Time spent flying through the air (seconds)
-const TOTAL_DURATION = SLIDE_DURATION + FLIGHT_DURATION; // Total time from spawn to impact
-const H_SPAWN = 8.5;             // Height offset for rail nozzle endpoint above pad center of mass
+const FLIGHT_DURATION = 1.2;     // Time spent flying from nozzle to Pad 1 (seconds)
+const TOTAL_DURATION = SLIDE_DURATION + FLIGHT_DURATION;
+const PATH_SPACING = 1.6;        // Equal spacing between consecutive pads in a phrase path
 
 // Dynamic Settings (controlled via UI)
 let gravityVal = 12.0;            // Gravity acceleration (units/s^2)
@@ -27,15 +28,18 @@ let bloomEnabled = true;
 let trailsEnabled = true;
 let railsVisible = true;
 let ballSizeMultiplier = 1.0;
-let cameraMode = 'auto';         // 'auto', 'orbit', 'follow'
+let cameraMode = 'auto';         // 'auto' = free orbit + autoRotate, 'orbit' = manual only, 'follow' = ball track
 let cameraAngle = 0;             // used for auto-orbiting
 
 // Registry and Pools
-const padRegistry = new Map();   // Key: "noteName", Value: { mesh, outerMesh, position, track, flashProgress, innerMaterial, outerMaterial }
-let activeBalls = [];            // Array of: { mesh, trailMesh, trailGeometry, trailPositions, note, track, tSpawn, tImpact, startPos, endPos, isBouncing, bounceProgress, velocity, railCurve }
+const padRegistry = new Map();   // Key: "phraseId_noteIndex", Value: { mesh, outerMesh, position, flashProgress, innerMaterial, outerMaterial, noteName }
+let activeBalls = [];            // Array of active ball objects
 let ripples = [];                // Array of: { mesh, age, maxAge }
-let overheadLaunchers = {};      // Key: track, Value: Vector3 position
-const trackRailCurves = {};      // Key: track, Value: CatmullRomCurve3
+const trackRailCurves = {};      // Key: phraseId, Value: CatmullRomCurve3
+const overheadLaunchers = {};      // Key: phraseId, Value: Vector3 position
+
+// Phrase Scheduler State
+let activeSongPhrases = [];      // Grouped note arrays scheduled to run
 
 // Timing synchronization
 let lastTime = 0;
@@ -57,13 +61,12 @@ function initThree() {
   
   // Scene
   scene = new THREE.Scene();
-  // Deep space-like void background
   scene.background = new THREE.Color(0x000000);
   scene.fog = new THREE.FogExp2(0x000000, 0.02);
 
   // Camera
   camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 1000);
-  camera.position.set(0, 10, 19);
+  camera.position.set(0, 11, 20);
 
   // Renderer
   renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
@@ -79,40 +82,99 @@ function initThree() {
   controls.dampingFactor = 0.05;
   controls.maxPolarAngle = Math.PI / 2 - 0.05;
   controls.minDistance = 5;
-  controls.maxDistance = 45;
+  controls.maxDistance = 55;
   controls.target.set(0, 3, 0);
+  controls.autoRotate = true;        // Default: gentle auto-rotate
+  controls.autoRotateSpeed = 0.6;   // Slow, cinematic drift
+  controls.enabled = true;          // Always allow manual grab
 
-  // Lighting
-  const ambientLight = new THREE.AmbientLight(0x1a1212, 0.4); 
-  scene.add(ambientLight);
+  // Lighting — Rich multi-source rig for full scene visibility
+  lightAmbient = new THREE.AmbientLight(0x332222, 1.2); 
+  scene.add(lightAmbient);
 
-  const centerLight = new THREE.PointLight(0xffffff, 2.0, 30); // Center highlighting light
-  centerLight.position.set(0, 6, 0);
-  scene.add(centerLight);
+  // Hemisphere light: warm sky + cool ground fill
+  lightHemi = new THREE.HemisphereLight(0xffeedd, 0x331a1a, 0.8);
+  scene.add(lightHemi);
 
-  const dirLight = new THREE.DirectionalLight(0xffffff, 0.6); // Reflected highlights on rails
-  dirLight.position.set(-15, 25, 10);
-  scene.add(dirLight);
+  // Center point light — illuminates hub and nearby pads
+  lightCenter = new THREE.PointLight(0xffffff, 3.0, 50); 
+  lightCenter.position.set(0, 8, 0);
+  scene.add(lightCenter);
 
-  // Grid floor (faint wireframe)
-  const gridHelper = new THREE.GridHelper(50, 50, 0x221111, 0x110505);
+  // Fill point light from below — catches undersides of pads/rails
+  lightFill = new THREE.PointLight(0xff9966, 1.0, 40);
+  lightFill.position.set(0, -1, 0);
+  scene.add(lightFill);
+
+  // Key directional light — strong top-down angled illumination
+  lightDir = new THREE.DirectionalLight(0xffffff, 1.2); 
+  lightDir.position.set(-15, 25, 10);
+  scene.add(lightDir);
+
+  // Rim directional from opposite side for depth
+  lightRim = new THREE.DirectionalLight(0xffccaa, 0.5);
+  lightRim.position.set(12, 15, -8);
+  scene.add(lightRim);
+
+  // Grid floor
+  const gridHelper = new THREE.GridHelper(60, 60, 0x221111, 0x110505);
   gridHelper.position.y = -0.1;
   scene.add(gridHelper);
+
+  // Central Hub Column (Visual origin for all rails)
+  const hubGeo = new THREE.CylinderGeometry(0.5, 0.7, 12, 16);
+  hubGeo.translate(0, 6, 0);
+  const hubMat = new THREE.MeshStandardMaterial({
+    color: 0x5a3030,      // Visible dark red-brown (not black)
+    metalness: 0.75,
+    roughness: 0.35,
+    emissive: 0x2a1010,   // Subtle self-illumination so bloom doesn't swallow it
+    emissiveIntensity: 0.4
+  });
+  const hubMesh = new THREE.Mesh(hubGeo, hubMat);
+  hubMesh.name = "rail-center-hub";
+  scene.add(hubMesh);
+
+  // Glowing accent ring at hub top
+  const hubRingGeo = new THREE.TorusGeometry(0.6, 0.06, 8, 32);
+  const hubRingMat = new THREE.MeshStandardMaterial({
+    color: 0xff4422,
+    emissive: 0xff2200,
+    emissiveIntensity: 2.0,
+    roughness: 0.2,
+    metalness: 0.5
+  });
+  const hubRingMesh = new THREE.Mesh(hubRingGeo, hubRingMat);
+  hubRingMesh.position.set(0, 12, 0);
+  hubRingMesh.rotation.x = Math.PI / 2;
+  scene.add(hubRingMesh);
+
+  // Mid-hub band for visual interest
+  const hubBandGeo = new THREE.TorusGeometry(0.55, 0.04, 8, 32);
+  const hubBandMat = new THREE.MeshStandardMaterial({
+    color: 0xcc3311,
+    emissive: 0xaa2200,
+    emissiveIntensity: 1.2,
+    roughness: 0.3
+  });
+  const hubBandMesh = new THREE.Mesh(hubBandGeo, hubBandMat);
+  hubBandMesh.position.set(0, 6, 0);
+  hubBandMesh.rotation.x = Math.PI / 2;
+  scene.add(hubBandMesh);
 
   // Post-Processing (Bloom Pass Filter)
   const renderPass = new RenderPass(scene, camera);
   composer = new EffectComposer(renderer);
   composer.addPass(renderPass);
 
-  const bloomPass = new UnrealBloomPass(
+  bloomPass = new UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
-    1.4,  // strength
+    0.7,  // strength (halved from 1.4)
     0.45, // radius
     0.15  // threshold
   );
   composer.addPass(bloomPass);
 
-  // Resize listener
   window.addEventListener('resize', onWindowResize);
 }
 
@@ -123,7 +185,40 @@ function onWindowResize() {
   composer.setSize(window.innerWidth, window.innerHeight);
 }
 
-// --- PROCEDURAL DRUM PADS AND MECHANICAL RAILS LAYOUT ---
+// --- MELODY PHRASE GROUPING LOGIC ---
+function groupNotesIntoPhrases(notes, trackName) {
+  if (notes.length === 0) return [];
+  
+  const phrases = [];
+  let currentPhrase = [];
+  
+  for (let i = 0; i < notes.length; i++) {
+    const note = notes[i];
+    
+    if (currentPhrase.length === 0) {
+      currentPhrase.push(note);
+    } else {
+      const lastNote = currentPhrase[currentPhrase.length - 1];
+      const gap = note.time - lastNote.time;
+      
+      // Group consecutive note steps. Chord notes (gap = 0.0) form separate phrases.
+      if (gap > 0.1 && gap <= 2.2 && currentPhrase.length < 5) {
+        currentPhrase.push(note);
+      } else {
+        phrases.push({ track: trackName, notes: currentPhrase, spawned: false });
+        currentPhrase = [note];
+      }
+    }
+  }
+  
+  if (currentPhrase.length > 0) {
+    phrases.push({ track: trackName, notes: currentPhrase, spawned: false });
+  }
+  
+  return phrases;
+}
+
+// --- PROCEDURAL DYNAMIC MELODY-PATH LAYOUT ---
 function buildVisualLayout(song) {
   // Clear existing items in registry
   padRegistry.forEach(pad => {
@@ -138,10 +233,10 @@ function buildVisualLayout(song) {
   });
   padRegistry.clear();
 
-  // Remove existing rails and launcher nodes
+  // Remove existing rails, nozzles, and hub meshes
   const launchersToRemove = [];
   scene.traverse(child => {
-    if (child.name && (child.name.startsWith('launcher-') || child.name.startsWith('rail-'))) {
+    if (child.name && (child.name.startsWith('launcher-') || child.name.startsWith('rail-')) && child.name !== 'rail-center-hub') {
       launchersToRemove.push(child);
     }
   });
@@ -160,201 +255,283 @@ function buildVisualLayout(song) {
     }
   });
 
-  // Extract unique notes
-  const uniqueNotes = new Set();
-  const noteTracks = new Map();
-  
+  // Re-group notes of song into phrases
+  activeSongPhrases = [];
+  for (const trackName in song.tracks) {
+    const trackPhrases = groupNotesIntoPhrases(song.tracks[trackName].notes, trackName);
+    activeSongPhrases.push(...trackPhrases);
+  }
+
+  // Find overall MIDI pitch range to map rainbow spectrum colors AND Y-height
+  let minMidi = 127;
+  let maxMidi = 0;
   for (const trackName in song.tracks) {
     song.tracks[trackName].notes.forEach(n => {
-      uniqueNotes.add(n.note);
-      noteTracks.set(n.note, trackName);
+      const midi = noteToMidi(n.note);
+      if (midi < minMidi) minMidi = midi;
+      if (midi > maxMidi) maxMidi = midi;
     });
   }
+  if (maxMidi === minMidi) {
+    maxMidi = minMidi + 12;
+    minMidi = minMidi - 12;
+  }
 
-  // Sort notes by pitch
-  const sortedNotes = Array.from(uniqueNotes).sort((a, b) => noteToMidi(a) - noteToMidi(b));
-  const totalNotes = sortedNotes.length;
+  // Pitch-to-Y mapping: low notes near floor, high notes elevated
+  // Creates multi-plane layout for natural bounce arcs
+  const Y_FLOOR = 0.6;   // Lowest pad height (deepest bass)
+  const Y_CEIL  = 5.5;   // Highest pad height (highest treble)
+  const midiRange = maxMidi - minMidi;
+  function midiToY(midi) {
+    const ratio = (midi - minMidi) / midiRange;
+    return Y_FLOOR + ratio * (Y_CEIL - Y_FLOOR);
+  }
 
-  // Step-spiral layout
-  sortedNotes.forEach((noteName, i) => {
-    const track = noteTracks.get(noteName);
-    const colorHex = song.tracks[track].color;
+  // Distribute phrases into tracks
+  const leadPhrases = activeSongPhrases.filter(p => p.track === 'lead');
+  const altoPhrases = activeSongPhrases.filter(p => p.track === 'alto');
+  const bassPhrases = activeSongPhrases.filter(p => p.track === 'bass');
 
-    const theta = i * 0.38; 
-    const radius = 2.5 + i * (13.0 / totalNotes); 
-    const x = radius * Math.cos(theta);
-    const z = radius * Math.sin(theta);
-    const y = i * (4.2 / totalNotes); 
-
-    const position = new THREE.Vector3(x, y, z);
-
-    // Create pad meshes (flat cylinder)
-    const padRadius = 0.45;
-    const padHeight = 0.12;
-    
-    // Outer metallic structural ring
-    const outerGeo = new THREE.CylinderGeometry(padRadius + 0.06, padRadius + 0.06, padHeight, 24);
-    const outerMat = new THREE.MeshStandardMaterial({
-      color: 0x3d2b2b, 
-      roughness: 0.2,
-      metalness: 0.9
-    });
-    const outerMesh = new THREE.Mesh(outerGeo, outerMat);
-    outerMesh.position.copy(position);
-    scene.add(outerMesh);
-
-    // Inner glowing face
-    const innerGeo = new THREE.CylinderGeometry(padRadius, padRadius, padHeight + 0.02, 24);
-    const innerMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(colorHex),
-      emissive: new THREE.Color(colorHex),
-      emissiveIntensity: 0.8,
-      roughness: 0.4
-    });
-    const innerMesh = new THREE.Mesh(innerGeo, innerMat);
-    innerMesh.position.copy(position);
-    scene.add(innerMesh);
-
-    // Register pad
-    padRegistry.set(noteName, {
-      mesh: innerMesh,
-      outerMesh: outerMesh,
-      position: position.clone(),
-      track: track,
-      flashProgress: 0,
-      innerMaterial: innerMat,
-      outerMaterial: outerMat
-    });
-  });
-
-  // Calculate overhead rails and launcher nodes
-  for (const trackName in song.tracks) {
-    const trackPads = [];
-    padRegistry.forEach((pad, note) => {
-      if (pad.track === trackName) {
-        trackPads.push(pad.position);
-      }
-    });
-
-    if (trackPads.length === 0) continue;
-
-    // Center of mass
-    const center = new THREE.Vector3();
-    trackPads.forEach(p => center.add(p));
-    center.divideScalar(trackPads.length);
-
-    // Launcher end nozzle position (above track center of mass)
-    const launcherPos = new THREE.Vector3(center.x, center.y + H_SPAWN, center.z);
-    overheadLaunchers[trackName] = launcherPos;
-
-    // Nozzle Group
-    const nozzleGroup = new THREE.Group();
-    nozzleGroup.name = `launcher-${trackName}`;
-    nozzleGroup.position.copy(launcherPos);
-
-    // Core cylinder nozzle pointing downwards
-    const nozzleGeo = new THREE.CylinderGeometry(0.3, 0.4, 0.8, 16);
-    nozzleGeo.rotateX(Math.PI / 2);
-    const nozzleMat = new THREE.MeshStandardMaterial({
-      color: 0x261919,
-      metalness: 0.9,
-      roughness: 0.15
-    });
-    const nozzleMesh = new THREE.Mesh(nozzleGeo, nozzleMat);
-    nozzleGroup.add(nozzleMesh);
-
-    // Neon emissive ring
-    const glowRingGeo = new THREE.TorusGeometry(0.24, 0.05, 8, 20);
-    glowRingGeo.rotateX(Math.PI / 2);
-    glowRingGeo.translate(0, -0.4, 0);
-    const glowRingMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(song.tracks[trackName].color),
-    });
-    const glowRing = new THREE.Mesh(glowRingGeo, glowRingMat);
-    nozzleGroup.add(glowRing);
-    nozzleGroup.visible = railsVisible;
-    scene.add(nozzleGroup);
-
-    // --- PROCEDURAL 3D DOUBLE-PIPE SLIDE RAILS ---
-    // Make rails wind in from high and far out to nozzle end
-    const pEndRail = launcherPos.clone();
-    const pMidRail = new THREE.Vector3(launcherPos.x - 3.5, launcherPos.y + 3.0, launcherPos.z - 4.5);
-    const pStartRail = new THREE.Vector3(launcherPos.x - 7.5, launcherPos.y + 6.5, launcherPos.z - 9.0);
-
-    const railCurve = new THREE.CatmullRomCurve3([pStartRail, pMidRail, pEndRail]);
-    trackRailCurves[trackName] = railCurve;
-
-    // Sample curve points to build parallel pipe geometry
-    const curveSamples = railCurve.getPoints(32);
-    const leftPipePoints = [];
-    const rightPipePoints = [];
-
-    for (let j = 0; j < curveSamples.length; j++) {
-      const p = curveSamples[j];
-      const t = railCurve.getTangentAt(j / (curveSamples.length - 1)).normalize();
+  // Map each phrase to a dedicated radial spoke angle grouped by track
+  const assignRadialSpokes = (phrases, startAngle, endAngle, trackName) => {
+    const count = phrases.length;
+    phrases.forEach((phrase, idx) => {
+      phrase.phraseId = `phrase_${trackName}_${idx}`;
       
-      // Horizontal normal vector
-      const up = new THREE.Vector3(0, 1, 0);
-      const norm = new THREE.Vector3().crossVectors(t, up).normalize();
+      // Calculate angular direction of the spoke path
+      const angle = startAngle + (idx / Math.max(1, count)) * (endAngle - startAngle);
+      phrase.angle = angle;
+      
+      const trackColorHex = song.tracks[trackName].color;
 
-      // Offset left & right
-      const leftPt = p.clone().addScaledVector(norm, 0.14);
-      const rightPt = p.clone().addScaledVector(norm, -0.14);
+      // Create sequential pads along this phrase spoke
+      phrase.notes.forEach((noteObj, k) => {
+        const midi = noteToMidi(noteObj.note);
 
-      leftPipePoints.push(leftPt);
-      rightPipePoints.push(rightPt);
-    }
+        // Rainbow pitch HSL mapping: Low = Red/Orange, High = Violet
+        const colorRatio = (midi - minMidi) / (maxMidi - minMidi);
+        const hue = colorRatio * 285; 
+        const padColor = new THREE.Color().setHSL(hue / 360, 0.95, 0.5);
 
-    const leftSpline = new THREE.CatmullRomCurve3(leftPipePoints);
-    const rightSpline = new THREE.CatmullRomCurve3(rightPipePoints);
+        // Radial coordinate mapping: distance increases outwards
+        // Y is driven by MIDI pitch — high notes sit high, low notes sit low
+        const radius = 3.5 + k * PATH_SPACING;
+        const x = radius * Math.cos(angle);
+        const z = radius * Math.sin(angle);
+        const y = midiToY(midi);
 
-    // Draw pipes (Tubes)
-    const leftTubeGeo = new THREE.TubeGeometry(leftSpline, 32, 0.035, 6, false);
-    const rightTubeGeo = new THREE.TubeGeometry(rightSpline, 32, 0.035, 6, false);
+        const position = new THREE.Vector3(x, y, z);
 
-    const railMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(song.tracks[trackName].color),
-      roughness: 0.15,
-      metalness: 0.85,
-      emissive: new THREE.Color(song.tracks[trackName].color),
-      emissiveIntensity: 0.25
+        // Pads geometries
+        const padRadius = 0.42;
+        const padHeight = 0.12;
+
+        const outerGeo = new THREE.CylinderGeometry(padRadius + 0.05, padRadius + 0.05, padHeight, 20);
+        const outerMat = new THREE.MeshStandardMaterial({ color: 0x2b1b1b, metalness: 0.85, roughness: 0.25 });
+        const outerMesh = new THREE.Mesh(outerGeo, outerMat);
+        outerMesh.position.copy(position);
+        scene.add(outerMesh);
+
+        const innerGeo = new THREE.CylinderGeometry(padRadius, padRadius, padHeight + 0.02, 20);
+        const innerMat = new THREE.MeshStandardMaterial({
+          color: padColor,
+          emissive: padColor,
+          emissiveIntensity: 0.8,
+          roughness: 0.35
+        });
+        const innerMesh = new THREE.Mesh(innerGeo, innerMat);
+        innerMesh.position.copy(position);
+        scene.add(innerMesh);
+
+        // Register pad with unique phrase_index key
+        const padKey = `${phrase.phraseId}_${k}`;
+        padRegistry.set(padKey, {
+          mesh: innerMesh,
+          outerMesh: outerMesh,
+          position: position.clone(),
+          track: trackName,
+          flashProgress: 0,
+          innerMaterial: innerMat,
+          outerMaterial: outerMat,
+          noteName: noteObj.note
+        });
+      });
+
+      // --- SECOND PASS: Tilt each pad using gravity-corrected impact velocity ---
+      // The ball's actual velocity at impact is dominated by gravity's pull downward,
+      // making the face normal point mostly UPWARD (not inward toward shaft).
+      const nozzleRadius = 3.5 - 1.2;
+      const nozzleY = Math.max(
+        padRegistry.get(`${phrase.phraseId}_0`).position.y + 2.5,
+        Y_CEIL + 1.5
+      );
+      const approxNozzlePos = new THREE.Vector3(
+        nozzleRadius * Math.cos(angle), nozzleY, nozzleRadius * Math.sin(angle)
+      );
+
+      const upAxis = new THREE.Vector3(0, 1, 0);
+      const GRAV = 12.0;
+      const MAX_TILT = Math.PI * 0.14; // 25° max — drums stay mostly upright
+
+      phrase.notes.forEach((noteObj, k) => {
+        const padKey = `${phrase.phraseId}_${k}`;
+        const pad = padRegistry.get(padKey);
+
+        // Compute actual impact velocity using parabolic physics (same as ball motion)
+        let vx, vyImpact, vz;
+        if (k === 0) {
+          const dt = Math.max(0.05, FLIGHT_DURATION);
+          const d = new THREE.Vector3().subVectors(pad.position, approxNozzlePos);
+          vx = d.x / dt; vz = d.z / dt;
+          const v0y = d.y / dt + 0.5 * GRAV * dt;
+          vyImpact = v0y - GRAV * dt; // velocity Y at moment of impact
+        } else {
+          const prevPad = padRegistry.get(`${phrase.phraseId}_${k - 1}`);
+          const dt = Math.max(0.05, phrase.notes[k].time - phrase.notes[k - 1].time);
+          const d = new THREE.Vector3().subVectors(pad.position, prevPad.position);
+          vx = d.x / dt; vz = d.z / dt;
+          const v0y = d.y / dt + 0.5 * GRAV * dt;
+          vyImpact = v0y - GRAV * dt;
+        }
+
+        // If ball arrives going upward (rising note with short travel time),
+        // keep drum flat — it's receiving from below and would face downward otherwise
+        if (vyImpact >= -0.5) {
+          pad.mesh.quaternion.identity();
+          pad.outerMesh.quaternion.identity();
+          return;
+        }
+
+        // Gravity makes vyImpact large and negative → impact velocity is steep downward
+        // So faceNormal = -impactVel is steep UPWARD → drum faces up, not the shaft
+        const impactVel = new THREE.Vector3(vx, vyImpact, vz).normalize();
+        const faceNormal = impactVel.clone().negate();
+
+        const angleBetween = Math.acos(Math.max(-1, Math.min(1, upAxis.dot(faceNormal))));
+        const clampedAngle = Math.min(angleBetween, MAX_TILT);
+
+        const rotAxis = new THREE.Vector3().crossVectors(upAxis, faceNormal);
+        if (rotAxis.lengthSq() < 0.001) {
+          pad.mesh.quaternion.identity();
+          pad.outerMesh.quaternion.identity();
+          return;
+        }
+        rotAxis.normalize();
+
+        const tiltQuat = new THREE.Quaternion().setFromAxisAngle(rotAxis, clampedAngle);
+        pad.mesh.quaternion.copy(tiltQuat);
+        pad.outerMesh.quaternion.copy(tiltQuat);
+      });
+
+      // Nozzle emitter position — elevated above first pad's pitch-based Y
+      const firstPadPos = padRegistry.get(`${phrase.phraseId}_0`).position;
+      const nozzlePos = new THREE.Vector3(
+        nozzleRadius * Math.cos(angle),
+        nozzleY,
+        nozzleRadius * Math.sin(angle)
+      );
+      overheadLaunchers[phrase.phraseId] = nozzlePos;
+
+      // Nozzle Mesh
+      const nozzleGroup = new THREE.Group();
+      nozzleGroup.name = `launcher-${phrase.phraseId}`;
+      nozzleGroup.position.copy(nozzlePos);
+
+      const nozzleGeo = new THREE.CylinderGeometry(0.25, 0.35, 0.6, 12);
+      nozzleGeo.rotateX(Math.PI / 2);
+      const nozzleMat = new THREE.MeshStandardMaterial({ color: 0x211414, metalness: 0.9, roughness: 0.2 });
+      const nozzleMesh = new THREE.Mesh(nozzleGeo, nozzleMat);
+      nozzleGroup.add(nozzleMesh);
+
+      const glowRingGeo = new THREE.TorusGeometry(0.2, 0.04, 8, 16);
+      glowRingGeo.rotateX(Math.PI / 2);
+      glowRingGeo.translate(0, -0.3, 0);
+      const glowRingMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(trackColorHex) });
+      const glowRing = new THREE.Mesh(glowRingGeo, glowRingMat);
+      nozzleGroup.add(glowRing);
+      
+      nozzleGroup.visible = railsVisible;
+      scene.add(nozzleGroup);
+
+      // --- PROCEDURAL 3D DOUBLE-PIPE SLIDE RAILS FROM CENTRAL HUB ---
+      const pStartRail = new THREE.Vector3(0, 11.0, 0); // Origin at central column hub
+      const pMidRail = new THREE.Vector3(
+        (nozzleRadius * 0.4) * Math.cos(angle),
+        nozzlePos.y + 1.8,
+        (nozzleRadius * 0.4) * Math.sin(angle)
+      );
+      const pEndRail = nozzlePos.clone();
+
+      const railCurve = new THREE.CatmullRomCurve3([pStartRail, pMidRail, pEndRail]);
+      trackRailCurves[phrase.phraseId] = railCurve;
+
+      // Generate parallel curves for pipes
+      const curveSamples = railCurve.getPoints(24);
+      const leftPipePoints = [];
+      const rightPipePoints = [];
+
+      for (let j = 0; j < curveSamples.length; j++) {
+        const p = curveSamples[j];
+        const t = railCurve.getTangentAt(j / (curveSamples.length - 1)).normalize();
+        const up = new THREE.Vector3(0, 1, 0);
+        const norm = new THREE.Vector3().crossVectors(t, up).normalize();
+
+        const leftPt = p.clone().addScaledVector(norm, 0.12);
+        const rightPt = p.clone().addScaledVector(norm, -0.12);
+
+        leftPipePoints.push(leftPt);
+        rightPipePoints.push(rightPt);
+      }
+
+      const leftSpline = new THREE.CatmullRomCurve3(leftPipePoints);
+      const rightSpline = new THREE.CatmullRomCurve3(rightPipePoints);
+
+      const leftTubeGeo = new THREE.TubeGeometry(leftSpline, 24, 0.03, 6, false);
+      const rightTubeGeo = new THREE.TubeGeometry(rightSpline, 24, 0.03, 6, false);
+
+      const railMat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(trackColorHex),
+        roughness: 0.15,
+        metalness: 0.85,
+        emissive: new THREE.Color(trackColorHex),
+        emissiveIntensity: 0.2
+      });
+
+      const leftRail = new THREE.Mesh(leftTubeGeo, railMat);
+      leftRail.name = `rail-${phrase.phraseId}-left`;
+      leftRail.visible = railsVisible;
+      scene.add(leftRail);
+
+      const rightRail = new THREE.Mesh(rightTubeGeo, railMat);
+      rightRail.name = `rail-${phrase.phraseId}-right`;
+      rightRail.visible = railsVisible;
+      scene.add(rightRail);
+
+      // Spacers / cross-ties
+      const tiesGroup = new THREE.Group();
+      tiesGroup.name = `rail-${phrase.phraseId}-ties`;
+      const tieGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.24, 8);
+      tieGeo.rotateZ(Math.PI / 2);
+      const tieMat = new THREE.MeshStandardMaterial({ color: 0x2b1b1b, metalness: 0.8, roughness: 0.3 });
+
+      for (let k = 0; k < leftPipePoints.length; k += 3) {
+        const lp = leftPipePoints[k];
+        const rp = rightPipePoints[k];
+        const tie = new THREE.Mesh(tieGeo, tieMat);
+        tie.position.addVectors(lp, rp).multiplyScalar(0.5);
+        tie.lookAt(rp);
+        tie.rotateY(Math.PI / 2);
+        tiesGroup.add(tie);
+      }
+      tiesGroup.visible = railsVisible;
+      scene.add(tiesGroup);
     });
+  };
 
-    const leftRail = new THREE.Mesh(leftTubeGeo, railMat);
-    leftRail.name = `rail-${trackName}-left`;
-    leftRail.visible = railsVisible;
-    scene.add(leftRail);
-
-    const rightRail = new THREE.Mesh(rightTubeGeo, railMat);
-    rightRail.name = `rail-${trackName}-right`;
-    rightRail.visible = railsVisible;
-    scene.add(rightRail);
-
-    // Cross-ties connecting pipes
-    const tiesGroup = new THREE.Group();
-    tiesGroup.name = `rail-${trackName}-ties`;
-    
-    const tieGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.28, 8);
-    tieGeo.rotateZ(Math.PI / 2);
-    const tieMat = new THREE.MeshStandardMaterial({
-      color: 0x3d2b2b,
-      metalness: 0.8,
-      roughness: 0.3
-    });
-
-    for (let k = 0; k < leftPipePoints.length; k += 2) {
-      const lp = leftPipePoints[k];
-      const rp = rightPipePoints[k];
-
-      const tie = new THREE.Mesh(tieGeo, tieMat);
-      tie.position.addVectors(lp, rp).multiplyScalar(0.5);
-      tie.lookAt(rp);
-      tie.rotateY(Math.PI / 2); // align cylinders sideways
-      tiesGroup.add(tie);
-    }
-    tiesGroup.visible = railsVisible;
-    scene.add(tiesGroup);
-  }
+  // Divide spokes evenly into sections: Lead (0 to 120deg), Alto (120 to 240deg), Bass (240 to 360deg)
+  assignRadialSpokes(leadPhrases, 0.05, (2 * Math.PI) / 3 - 0.05, 'lead');
+  assignRadialSpokes(altoPhrases, (2 * Math.PI) / 3 + 0.05, (4 * Math.PI) / 3 - 0.05, 'alto');
+  assignRadialSpokes(bassPhrases, (4 * Math.PI) / 3 + 0.05, 2 * Math.PI - 0.05, 'bass');
 }
 
 // --- AUDIO TIMELINE SYNCHRONIZATION ---
@@ -362,59 +539,57 @@ function loadSongTimeline(song) {
   Tone.Transport.stop();
   Tone.Transport.cancel();
 
-  // Reset note spawn states
-  for (const trackName in song.tracks) {
-    song.tracks[trackName].notes.forEach(note => {
-      note.spawned = false;
-    });
-  }
+  buildVisualLayout(song);
 
   // Set BPM
   Tone.Transport.bpm.value = song.bpm;
 
-  // Schedule notes
+  // Schedule notes by phrase blocks
   let maxTime = 0;
 
-  for (const trackName in song.tracks) {
-    song.tracks[trackName].notes.forEach(note => {
+  activeSongPhrases.forEach(phraseObj => {
+    const phraseId = phraseObj.phraseId;
+    const track = phraseObj.track;
+
+    phraseObj.notes.forEach((note, noteIdx) => {
       if (note.time > maxTime) maxTime = note.time;
 
       Tone.Transport.schedule((time) => {
-        playSynthNote(trackName, note.note, note.duration, time);
+        playSynthNote(track, note.note, note.duration, time);
         Tone.Draw.schedule(() => {
-          triggerPadFlash(note.note, trackName);
+          triggerPadFlash(phraseId, noteIdx);
         }, time);
       }, note.time);
     });
-  }
+  });
 
   Tone.Transport.loop = true;
   Tone.Transport.loopStart = 0;
-  Tone.Transport.loopEnd = maxTime + 2.5; // Pad for final note trail
+  Tone.Transport.loopEnd = maxTime + 2.5; 
 }
 
 // --- VISUAL EFFECT: FLASHER AND RIPPLES ---
-function triggerPadFlash(noteName, trackName) {
-  const pad = padRegistry.get(noteName);
+function triggerPadFlash(phraseId, noteIndex) {
+  const padKey = `${phraseId}_${noteIndex}`;
+  const pad = padRegistry.get(padKey);
   if (pad) {
     pad.flashProgress = 1.0;
     
     // Update diagnostic playing note
     const diagNote = document.getElementById('diag-note');
-    diagNote.innerText = noteName;
-    diagNote.style.color = activeSong.tracks[trackName].color;
+    diagNote.innerText = pad.noteName;
+    diagNote.style.color = '#' + pad.innerMaterial.color.getHexString();
 
-    // Ripple
-    createRipple(pad.position, activeSong.tracks[trackName].color);
+    createRipple(pad.position, pad.innerMaterial.color);
   }
 }
 
-function createRipple(position, colorHex) {
+function createRipple(position, color) {
   const ringGeo = new THREE.RingGeometry(0.35, 0.42, 32);
   ringGeo.rotateX(-Math.PI / 2);
   
   const ringMat = new THREE.MeshBasicMaterial({
-    color: new THREE.Color(colorHex),
+    color: color,
     transparent: true,
     opacity: 0.8,
     side: THREE.DoubleSide
@@ -433,6 +608,7 @@ function createRipple(position, colorHex) {
   });
 }
 
+// Update Expanding Ripples
 function updateRipples(dt) {
   for (let i = ripples.length - 1; i >= 0; i--) {
     const r = ripples[i];
@@ -452,27 +628,34 @@ function updateRipples(dt) {
   }
 }
 
-// --- KINEMATIC & PHYSICAL BALL SYSTEM ---
-function spawnBall(note, track) {
-  const pad = padRegistry.get(note.note);
-  if (!pad) return;
+// --- DYNAMIC MULTI-BOUNCE KINEMATIC & PHYSICAL BALL SYSTEM ---
+function spawnBallForPhrase(phraseObj) {
+  const notes = phraseObj.notes;
+  if (notes.length === 0) return;
 
-  const colorHex = activeSong.tracks[track].color;
+  const phraseId = phraseObj.phraseId;
+  const firstNote = notes[0];
+  const firstPadKey = `${phraseId}_0`;
+  const firstPad = padRegistry.get(firstPadKey);
+  if (!firstPad) return;
+
+  const track = phraseObj.track;
 
   // Ball Mesh
   const ballRadius = 0.16 * ballSizeMultiplier;
   const ballGeo = new THREE.SphereGeometry(ballRadius, 16, 16);
+  // Ball starts with glowing white base
   const ballMat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(colorHex),
-    emissive: new THREE.Color(colorHex),
+    color: 0xffffff,
+    emissive: 0xffffff,
     emissiveIntensity: 1.8,
     roughness: 0.15,
     metalness: 0.2
   });
   const ballMesh = new THREE.Mesh(ballGeo, ballMat);
 
-  const startPos = overheadLaunchers[track].clone();
-  ballMesh.position.copy(trackRailCurves[track].getPointAt(0)); // Start at top of rail
+  const startPos = overheadLaunchers[phraseId].clone();
+  ballMesh.position.copy(trackRailCurves[phraseId].getPointAt(0)); 
   scene.add(ballMesh);
 
   // Trail System
@@ -481,36 +664,55 @@ function spawnBall(note, track) {
   if (trailsEnabled) {
     trailGeometry = new THREE.BufferGeometry();
     const trailMat = new THREE.LineBasicMaterial({
-      color: new THREE.Color(colorHex),
+      color: 0xffffff,
       transparent: true,
       opacity: 0.65,
       linewidth: 2
     });
     
-    const positions = new Float32Array(30); // 10 points
+    const positions = new Float32Array(30); 
     trailGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     
     trailMesh = new THREE.Line(trailGeometry, trailMat);
     scene.add(trailMesh);
   }
 
-  // Queue active ball
-  activeBalls.push({
+  // Setup Initial Segment: Launcher -> Pad 1
+  const ball = {
     mesh: ballMesh,
     trailMesh: trailMesh,
     trailGeometry: trailGeometry,
     trailPositions: [],
-    note: note,
+    phrase: notes,
+    phraseId: phraseId,
     track: track,
-    tSpawn: note.time - TOTAL_DURATION,
-    tImpact: note.time,
-    startPos: startPos,
-    endPos: pad.position.clone(),
-    isBouncing: false,
+    tSpawn: firstNote.time - TOTAL_DURATION,
+    currentNoteIndex: 0,
+    isBouncingOut: false,
     bounceProgress: 0,
-    velocity: new THREE.Vector3(), // Calculated at transition
-    railCurve: trackRailCurves[track]
-  });
+    velocity: new THREE.Vector3(),
+    railCurve: trackRailCurves[phraseId],
+    
+    // Segment bounds — initial arc from nozzle to first pad
+    segmentStartPos: startPos,
+    segmentEndPos: firstPad.position.clone(),
+    segmentStartTime: firstNote.time - FLIGHT_DURATION,
+    segmentEndTime: firstNote.time,
+    segmentDuration: FLIGHT_DURATION,
+    // Compute v0y so ball arcs cleanly from nozzle to first pad
+    segmentV0y: (firstPad.position.y - startPos.y) / FLIGHT_DURATION + 0.5 * 12.0 * FLIGHT_DURATION
+  };
+
+  activeBalls.push(ball);
+
+  // Pulse the launcher nozzle
+  const launcherNode = scene.getObjectByName(`launcher-${phraseId}`);
+  if (launcherNode) {
+    launcherNode.scale.set(1.3, 1.3, 1.3);
+    setTimeout(() => {
+      if (launcherNode) launcherNode.scale.set(1.0, 1.0, 1.0);
+    }, 150);
+  }
 }
 
 function updateActiveBalls(currentTime, dt) {
@@ -521,17 +723,14 @@ function updateActiveBalls(currentTime, dt) {
     ball.mesh.visible = !isFilteredOut;
     if (ball.trailMesh) ball.trailMesh.visible = !isFilteredOut && trailsEnabled;
 
-    const tau = currentTime - ball.tSpawn; // Total elapsed time
+    const tau = currentTime - ball.tSpawn;
 
-    if (ball.isBouncing) {
-      // Bounce Phase (Numerical physics integration)
+    if (ball.isBouncingOut) {
+      // --- BOUNCE OUT PHASE (Drop off the final pad into void) ---
       ball.bounceProgress += dt;
-      
-      // Accelerate under gravity
       ball.velocity.y -= gravityVal * dt;
       ball.mesh.position.addScaledVector(ball.velocity, dt);
 
-      // Bounce-out limits (shrink and fade, then remove)
       if (ball.mesh.position.y < -3.0 || ball.bounceProgress > 2.0) {
         scene.remove(ball.mesh);
         ball.mesh.geometry.dispose();
@@ -547,7 +746,7 @@ function updateActiveBalls(currentTime, dt) {
         continue;
       }
 
-      // Shrink ball as it drops into void
+      // Shrink and fade
       const t = ball.bounceProgress;
       if (t > 0.8) {
         const shrink = Math.max(0, 1.0 - (t - 0.8) / 1.2);
@@ -560,37 +759,8 @@ function updateActiveBalls(currentTime, dt) {
       }
 
     } else {
-      // Pre-impact phases
-      if (tau < 0) continue; // Not spawned yet
-
-      if (tau >= TOTAL_DURATION) {
-        // --- NOTE IMPACT TRIGGERS ---
-        ball.isBouncing = true;
-        ball.bounceProgress = 0;
-        
-        // Exact snapping on strike frame
-        ball.mesh.position.copy(ball.endPos);
-
-        // Calculate pre-impact horizontal velocity
-        const vx = (ball.endPos.x - ball.startPos.x) / FLIGHT_DURATION;
-        const vz = (ball.endPos.z - ball.startPos.z) / FLIGHT_DURATION;
-
-        // Calculate pre-impact vertical velocity (v_y = v0_y - g*t)
-        // v0_y = (endPos.y - startPos.y)/D + 0.5*g*D
-        const v0_y = (ball.endPos.y - ball.startPos.y) / FLIGHT_DURATION + 0.5 * gravityVal * FLIGHT_DURATION;
-        const vy_impact = v0_y - gravityVal * FLIGHT_DURATION;
-
-        // Bouncing restitution and friction physics
-        const restitution = 0.55; 
-        const friction = 0.7;
-
-        ball.velocity.set(
-          vx * friction + (Math.random() - 0.5) * 0.4,
-          -vy_impact * restitution, 
-          vz * friction + (Math.random() - 0.5) * 0.4
-        );
-        continue;
-      }
+      // --- SLIDE & MELODY BOUNCING PHASES ---
+      if (tau < 0) continue; // Waiting for spawn
 
       if (tau < SLIDE_DURATION) {
         // --- PHASE 1: RAIL SLIDE ---
@@ -598,20 +768,89 @@ function updateActiveBalls(currentTime, dt) {
         const posOnRail = ball.railCurve.getPointAt(u);
         ball.mesh.position.copy(posOnRail);
 
+        // Color shifts to match Pad 1 pitch HSL
+        const firstPad = padRegistry.get(`${ball.phraseId}_0`);
+        if (firstPad) {
+          ball.mesh.material.color.copy(firstPad.innerMaterial.color);
+          ball.mesh.material.emissive.copy(firstPad.innerMaterial.color);
+          if (ball.trailMesh) ball.trailMesh.material.color.copy(firstPad.innerMaterial.color);
+        }
+
       } else {
-        // --- PHASE 2: PARABOLIC FLIGHT ---
-        const tFlight = tau - SLIDE_DURATION; // Time in flight
-        const ratio = tFlight / FLIGHT_DURATION;
+        // --- PHASE 2 & 3: INTER-PAD MELODY BOUNCING ---
+        // Impact Check
+        if (currentTime >= ball.segmentEndTime) {
+          const noteObj = ball.phrase[ball.currentNoteIndex];
+          const currentPadKey = `${ball.phraseId}_${ball.currentNoteIndex}`;
+          
+          // Sound and pad flash
+          playSynthNote(ball.track, noteObj.note, noteObj.duration, Tone.now());
+          triggerPadFlash(ball.phraseId, ball.currentNoteIndex);
 
-        // Horizontal linear interpolation
-        const x = THREE.MathUtils.lerp(ball.startPos.x, ball.endPos.x, ratio);
-        const z = THREE.MathUtils.lerp(ball.startPos.z, ball.endPos.z, ratio);
+          if (ball.currentNoteIndex === ball.phrase.length - 1) {
+            // Hit final note in phrase -> Bounce off into abyss
+            ball.isBouncingOut = true;
+            ball.bounceProgress = 0;
+            ball.mesh.position.copy(ball.segmentEndPos);
 
-        // Vertical Parabolic motion
-        const v0_y = (ball.endPos.y - ball.startPos.y) / FLIGHT_DURATION + 0.5 * gravityVal * FLIGHT_DURATION;
-        const y = ball.startPos.y + v0_y * tFlight - 0.5 * gravityVal * tFlight * tFlight;
+            // Compute post-collision final ejection velocity
+            const vx = (ball.segmentEndPos.x - ball.segmentStartPos.x) / ball.segmentDuration;
+            const vz = (ball.segmentEndPos.z - ball.segmentStartPos.z) / ball.segmentDuration;
+            const vy_impact = ball.segmentV0y - gravityVal * ball.segmentDuration;
+
+            const restitution = 0.55;
+            const friction = 0.7;
+
+            ball.velocity.set(
+              vx * friction + (Math.random() - 0.5) * 0.4,
+              -vy_impact * restitution,
+              vz * friction + (Math.random() - 0.5) * 0.4
+            );
+            continue;
+          } else {
+            // Transition to NEXT pad bounce segment!
+            ball.currentNoteIndex++;
+            
+            const prevPadPos = ball.segmentEndPos.clone();
+            const nextPadKey = `${ball.phraseId}_${ball.currentNoteIndex}`;
+            const nextPad = padRegistry.get(nextPadKey);
+            const nextNote = ball.phrase[ball.currentNoteIndex];
+            
+            ball.segmentStartPos.copy(prevPadPos);
+            ball.segmentEndPos.copy(nextPad.position);
+            ball.segmentStartTime = ball.segmentEndTime;
+            ball.segmentEndTime = nextNote.time;
+            // Clamp duration: chords / near-simultaneous notes get a minimum flight time
+            ball.segmentDuration = Math.max(0.05, ball.segmentEndTime - ball.segmentStartTime);
+
+            // Recalculate vertical velocity v0_y
+            ball.segmentV0y = (ball.segmentEndPos.y - ball.segmentStartPos.y) / ball.segmentDuration + 0.5 * gravityVal * ball.segmentDuration;
+          }
+        }
+
+        // Analytical parabolic interpolation for the current bounce segment
+        const tSegment = currentTime - ball.segmentStartTime;
+        // Guard: if tSegment is negative (e.g. after a loop reset), clamp to 0
+        const tClamped = Math.max(0, tSegment);
+        const ratio = Math.min(1.0, tClamped / ball.segmentDuration);
+
+        // Linear interpolation on X and Z
+        const x = THREE.MathUtils.lerp(ball.segmentStartPos.x, ball.segmentEndPos.x, ratio);
+        const z = THREE.MathUtils.lerp(ball.segmentStartPos.z, ball.segmentEndPos.z, ratio);
+
+        // Parabolic arc Y(t) = start.y + v0_y*t - 0.5*g*t^2
+        const y = ball.segmentStartPos.y + ball.segmentV0y * tClamped - 0.5 * gravityVal * tClamped * tClamped;
 
         ball.mesh.position.set(x, y, z);
+
+        // Color shifts dynamically to match the upcoming target pad
+        const nextPadKey = `${ball.phraseId}_${ball.currentNoteIndex}`;
+        const nextPad = padRegistry.get(nextPadKey);
+        if (nextPad) {
+          ball.mesh.material.color.lerp(nextPad.innerMaterial.color, 0.08);
+          ball.mesh.material.emissive.lerp(nextPad.innerMaterial.color, 0.08);
+          if (ball.trailMesh) ball.trailMesh.material.color.lerp(nextPad.innerMaterial.color, 0.08);
+        }
       }
 
       if (trailsEnabled && ball.trailMesh) {
@@ -662,11 +901,9 @@ function updatePadsDecay() {
 }
 
 function resetNoteSpawnStates() {
-  for (const trackName in activeSong.tracks) {
-    activeSong.tracks[trackName].notes.forEach(note => {
-      note.spawned = false;
-    });
-  }
+  activeSongPhrases.forEach(phrase => {
+    phrase.spawned = false;
+  });
 }
 
 // --- LOOK-AHEAD SCHEDULER TICK LOOP ---
@@ -685,16 +922,15 @@ function schedulerTick() {
   document.getElementById('diag-time').innerText = `t=${currentTime.toFixed(1)}`;
 
   // Look-Ahead Schedule
-  for (const trackName in activeSong.tracks) {
-    if (activeFilter !== 'all' && trackName !== activeFilter) continue;
+  activeSongPhrases.forEach(phraseObj => {
+    if (activeFilter !== 'all' && phraseObj.track !== activeFilter) return;
 
-    activeSong.tracks[trackName].notes.forEach(note => {
-      if (!note.spawned && currentTime >= (note.time - TOTAL_DURATION)) {
-        spawnBall(note, trackName);
-        note.spawned = true;
-      }
-    });
-  }
+    const spawnTime = phraseObj.notes[0].time - TOTAL_DURATION;
+    if (!phraseObj.spawned && currentTime >= spawnTime) {
+      spawnBallForPhrase(phraseObj);
+      phraseObj.spawned = true;
+    }
+  });
 }
 
 // --- CORE RENDER LOOP ---
@@ -711,20 +947,13 @@ function animate() {
   updatePadsDecay();
 
   // Camera views
-  if (cameraMode === 'auto') {
-    cameraAngle += 0.0018;
-    camera.position.x = Math.cos(cameraAngle) * 19;
-    camera.position.z = Math.sin(cameraAngle) * 19;
-    camera.position.y = 8 + Math.sin(cameraAngle * 0.4) * 3.0;
-    camera.lookAt(0, 3, 0);
-  } else if (cameraMode === 'follow' && activeBalls.length > 0) {
+  if (cameraMode === 'follow' && activeBalls.length > 0) {
     const targetBall = activeBalls[activeBalls.length - 1];
     const targetPos = new THREE.Vector3();
     targetBall.mesh.getWorldPosition(targetPos);
-    
     controls.target.lerp(targetPos, 0.06);
-    camera.lookAt(controls.target);
   }
+  // autoRotate is handled natively by controls.update() below
 
   controls.update();
 
@@ -863,16 +1092,50 @@ function setupUIListeners() {
   const cameraSelect = document.getElementById('camera-select');
   cameraSelect.addEventListener('change', (e) => {
     cameraMode = e.target.value;
-    if (cameraMode === 'orbit') {
+    if (cameraMode === 'auto') {
+      controls.autoRotate = true;
       controls.enabled = true;
-    } else {
-      controls.enabled = false;
+    } else if (cameraMode === 'orbit') {
+      controls.autoRotate = false;
+      controls.enabled = true;
+    } else if (cameraMode === 'follow') {
+      controls.autoRotate = false;
+      controls.enabled = true;
     }
   });
 
   // Bloom checkbox
   document.getElementById('toggle-bloom').addEventListener('change', (e) => {
     bloomEnabled = e.target.checked;
+  });
+
+  // Bloom strength/radius/threshold sliders
+  document.getElementById('slider-bloom-strength').addEventListener('input', (e) => {
+    if (bloomPass) bloomPass.strength = parseFloat(e.target.value);
+  });
+  document.getElementById('slider-bloom-radius').addEventListener('input', (e) => {
+    if (bloomPass) bloomPass.radius = parseFloat(e.target.value);
+  });
+  document.getElementById('slider-bloom-threshold').addEventListener('input', (e) => {
+    if (bloomPass) bloomPass.threshold = parseFloat(e.target.value);
+  });
+
+  // Lighting sliders
+  document.getElementById('slider-light-ambient').addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    if (lightAmbient) lightAmbient.intensity = v;
+    if (lightHemi) lightHemi.intensity = v * 0.67; // scale hemi proportionally
+  });
+  document.getElementById('slider-light-center').addEventListener('input', (e) => {
+    if (lightCenter) lightCenter.intensity = parseFloat(e.target.value);
+  });
+  document.getElementById('slider-light-dir').addEventListener('input', (e) => {
+    if (lightDir) lightDir.intensity = parseFloat(e.target.value);
+  });
+  document.getElementById('slider-light-fill').addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    if (lightFill) lightFill.intensity = v;
+    if (lightRim) lightRim.intensity = v * 0.5;
   });
 
   // Trails checkbox
