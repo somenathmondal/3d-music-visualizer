@@ -158,6 +158,7 @@ function initThree() {
     metalness: 0.5
   });
   const hubRingMesh = new THREE.Mesh(hubRingGeo, hubRingMat);
+  hubRingMesh.name = "hub-ring";
   hubRingMesh.position.set(0, 12, 0);
   hubRingMesh.rotation.x = Math.PI / 2;
   scene.add(hubRingMesh);
@@ -171,6 +172,7 @@ function initThree() {
     roughness: 0.3
   });
   const hubBandMesh = new THREE.Mesh(hubBandGeo, hubBandMat);
+  hubBandMesh.name = "hub-band";
   hubBandMesh.position.set(0, 6, 0);
   hubBandMesh.rotation.x = Math.PI / 2;
   scene.add(hubBandMesh);
@@ -778,6 +780,10 @@ function createRipple(position, color) {
 function updateRipples(dt) {
   for (let i = ripples.length - 1; i >= 0; i--) {
     const r = ripples[i];
+    
+    // Hide ripples in piano mode
+    r.mesh.visible = (activeTab === 'kinematic');
+
     r.age += dt;
     const progress = r.age / r.maxAge;
 
@@ -796,6 +802,7 @@ function updateRipples(dt) {
 
 // --- DYNAMIC MULTI-BOUNCE KINEMATIC & PHYSICAL BALL SYSTEM ---
 function spawnBallForPhrase(phraseObj) {
+  if (activeTab === 'piano') return;
   const notes = phraseObj.notes;
   if (notes.length === 0) return;
 
@@ -885,7 +892,7 @@ function updateActiveBalls(currentTime, dt) {
   for (let i = activeBalls.length - 1; i >= 0; i--) {
     const ball = activeBalls[i];
     
-    const isFilteredOut = activeFilter !== 'all' && ball.track !== activeFilter;
+    const isFilteredOut = (activeFilter !== 'all' && ball.track !== activeFilter) || (activeTab === 'piano');
     ball.mesh.visible = !isFilteredOut;
     if (ball.trailMesh) ball.trailMesh.visible = !isFilteredOut && trailsEnabled;
 
