@@ -436,20 +436,20 @@ export function initAudio() {
   synths.alto.connect(altoFilter);
 
   // Bass Synth: Deep cello-like warm string bass
-  synths.bass = new Tone.MonoSynth({
+  synths.bass = new Tone.PolySynth(Tone.MonoSynth, {
     oscillator: {
-      type: 'triangle'
+      type: 'sawtooth'
     },
     filter: {
       Q: 1.0,
       type: 'lowpass',
-      frequency: 220
+      frequency: 120
     },
     envelope: {
-      attack: 0.12,
-      decay: 0.4,
-      sustain: 0.5,
-      release: 0.5
+      attack: 0.08,
+      decay: 0.3,
+      sustain: 0.4,
+      release: 0.8
     }
   }).toDestination();
 }
