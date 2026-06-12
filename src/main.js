@@ -21,10 +21,13 @@ const FLIGHT_DURATION = 1.2;     // Time spent flying from nozzle to Pad 1 (seco
 const TOTAL_DURATION = SLIDE_DURATION + FLIGHT_DURATION;
 const PATH_SPACING = 1.6;        // Equal spacing between consecutive pads in a phrase path
 
+// Device Detection for Mobile Performance & Compatibility
+const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth < 768;
+
 // Dynamic Settings (controlled via UI)
 let gravityVal = 12.0;            // Gravity acceleration (units/s^2)
 let activeFilter = 'all';
-let bloomEnabled = true;
+let bloomEnabled = !isMobileDevice; // Disable bloom on mobile by default to prevent black screen WebGL2 failures
 let trailsEnabled = true;
 let railsVisible = true;
 let ballSizeMultiplier = 1.0;
@@ -964,6 +967,9 @@ function resetVisualizer() {
 
 // --- INTERACTIVE EVENT LISTENERS & SETUP ---
 function setupUIListeners() {
+  // Sync bloom checkbox state
+  document.getElementById('toggle-bloom').checked = bloomEnabled;
+
   // Start overlay click
   const startBtn = document.getElementById('start-btn');
   const startOverlay = document.getElementById('start-overlay');
