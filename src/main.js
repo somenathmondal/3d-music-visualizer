@@ -357,74 +357,10 @@ function buildVisualLayout(song) {
         });
       });
 
-      // --- SECOND PASS: Tilt each pad using gravity-corrected impact velocity ---
-      // The ball's actual velocity at impact is dominated by gravity's pull downward,
-      // making the face normal point mostly UPWARD (not inward toward shaft).
-      const nozzleRadius = 3.5 - 1.2;
-      const nozzleY = Math.max(
-        padRegistry.get(`${phrase.phraseId}_0`).position.y + 2.5,
-        Y_CEIL + 1.5
-      );
-      const approxNozzlePos = new THREE.Vector3(
-        nozzleRadius * Math.cos(angle), nozzleY, nozzleRadius * Math.sin(angle)
-      );
-
-      const upAxis = new THREE.Vector3(0, 1, 0);
-      const GRAV = 12.0;
-      const MAX_TILT = Math.PI * 0.14; // 25° max — drums stay mostly upright
-
-      phrase.notes.forEach((noteObj, k) => {
-        const padKey = `${phrase.phraseId}_${k}`;
-        const pad = padRegistry.get(padKey);
-
-        // Compute actual impact velocity using parabolic physics (same as ball motion)
-        let vx, vyImpact, vz;
-        if (k === 0) {
-          const dt = Math.max(0.05, FLIGHT_DURATION);
-          const d = new THREE.Vector3().subVectors(pad.position, approxNozzlePos);
-          vx = d.x / dt; vz = d.z / dt;
-          const v0y = d.y / dt + 0.5 * GRAV * dt;
-          vyImpact = v0y - GRAV * dt; // velocity Y at moment of impact
-        } else {
-          const prevPad = padRegistry.get(`${phrase.phraseId}_${k - 1}`);
-          const dt = Math.max(0.05, phrase.notes[k].time - phrase.notes[k - 1].time);
-          const d = new THREE.Vector3().subVectors(pad.position, prevPad.position);
-          vx = d.x / dt; vz = d.z / dt;
-          const v0y = d.y / dt + 0.5 * GRAV * dt;
-          vyImpact = v0y - GRAV * dt;
-        }
-
-        // If ball arrives going upward (rising note with short travel time),
-        // keep drum flat — it's receiving from below and would face downward otherwise
-        if (vyImpact >= -0.5) {
-          pad.mesh.quaternion.identity();
-          pad.outerMesh.quaternion.identity();
-          return;
-        }
-
-        // Gravity makes vyImpact large and negative → impact velocity is steep downward
-        // So faceNormal = -impactVel is steep UPWARD → drum faces up, not the shaft
-        const impactVel = new THREE.Vector3(vx, vyImpact, vz).normalize();
-        const faceNormal = impactVel.clone().negate();
-
-        const angleBetween = Math.acos(Math.max(-1, Math.min(1, upAxis.dot(faceNormal))));
-        const clampedAngle = Math.min(angleBetween, MAX_TILT);
-
-        const rotAxis = new THREE.Vector3().crossVectors(upAxis, faceNormal);
-        if (rotAxis.lengthSq() < 0.001) {
-          pad.mesh.quaternion.identity();
-          pad.outerMesh.quaternion.identity();
-          return;
-        }
-        rotAxis.normalize();
-
-        const tiltQuat = new THREE.Quaternion().setFromAxisAngle(rotAxis, clampedAngle);
-        pad.mesh.quaternion.copy(tiltQuat);
-        pad.outerMesh.quaternion.copy(tiltQuat);
-      });
-
       // Nozzle emitter position — elevated above first pad's pitch-based Y
       const firstPadPos = padRegistry.get(`${phrase.phraseId}_0`).position;
+      const nozzleRadius = 3.5 - 1.2;
+      const nozzleY = Math.max(firstPadPos.y + 2.5, Y_CEIL + 1.5);
       const nozzlePos = new THREE.Vector3(
         nozzleRadius * Math.cos(angle),
         nozzleY,
