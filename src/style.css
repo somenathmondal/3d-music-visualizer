@@ -279,6 +279,32 @@ body {
   color: var(--text-muted);
 }
 
+/* Top Left Developer Credits */
+.hud-developer {
+  position: absolute;
+  top: 30px;
+  left: 30px;
+  font-family: 'Space Mono', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  z-index: 15;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+}
+
+.hud-developer a {
+  color: var(--text-primary);
+  text-decoration: none;
+  font-weight: 700;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.4);
+  transition: all 0.25s ease;
+}
+
+.hud-developer a:hover {
+  color: var(--accent-coral);
+  border-bottom-color: var(--accent-coral);
+  text-shadow: 0 0 8px var(--accent-coral-glow);
+}
+
 /* Bottom Right Controls Overlay */
 .hud-controls-right {
   position: absolute;
@@ -454,9 +480,15 @@ body {
     font-size: 28px;
   }
 
+  .hud-developer {
+    top: 15px;
+    left: 15px;
+    font-size: 10px;
+  }
+
   .hud-diagnostic {
     bottom: auto;
-    top: 15px;
+    top: 45px;
     left: 15px;
   }
   
