@@ -1,4 +1,5 @@
 import './style.css';
+import { inject as injectVercelAnalytics } from '@vercel/analytics';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
@@ -1624,6 +1625,7 @@ async function handleMidiFile(file) {
 
 // --- RUN BOILERPLATE SETUP ---
 function main() {
+  injectVercelAnalytics();
   initThree();
   buildVisualLayout(activeSong);
   loadSongTimeline(activeSong);
